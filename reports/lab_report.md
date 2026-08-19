@@ -1,6 +1,6 @@
 # Báo cáo thực hành và thuyết minh kỹ thuật — Lab 19: GraphRAG vs Flat RAG
 
-**Học viên:** Đỗ Tuấn Sơn
+**Học viên:** Phó Viết Tiến Anh
 
 **Khóa học:** AICB-K34 · Track 3: GraphRAG
 
