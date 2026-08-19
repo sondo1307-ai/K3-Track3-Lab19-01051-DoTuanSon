@@ -1,6 +1,6 @@
 # Thuyết minh kỹ thuật — Lab 19: GraphRAG vs Flat RAG
 
-**Học viên:** Phó Viết Tiến Anh
+**Học viên:** Đỗ Tuấn Sơn
 
 **Dữ liệu thực nghiệm:** 5.000 bản ghi nguồn; 2.105 bài sau exact dedup; 1.500 bài/chunk trong lab; 176 triple được trích xuất bằng OpenAI; 340 node, 219 edge và 0 edge thiếu provenance trong Neo4j.
 
