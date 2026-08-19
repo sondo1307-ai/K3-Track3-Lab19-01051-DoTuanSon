@@ -1,101 +1,73 @@
-# Thuyết minh Kỹ thuật — Lab 19: GraphRAG vs Flat RAG
+# Thuyết minh kỹ thuật — Lab 19: GraphRAG vs Flat RAG
 
-**Học viên:** Đỗ Tuấn Sơn · **Khóa:** AICB-K34 · Track 3: GraphRAG
-**Dataset:** `HackerNoon/tech-company-news-data-dump` (first-5000-rows subset)
+**Học viên:** Phó Viết Tiến Anh
 
-> ⚠️ Các ô đánh dấu `‹FILL: ...›` cần điền **số liệu thật** sau khi chạy `Restart & Run All` trên Colab.
-> Nguồn số liệu được ghi rõ ngay trong ô (tên biến / cell notebook).
+**Dữ liệu thực nghiệm:** 5.000 bản ghi nguồn; 2.105 bài sau exact dedup; 1.500 bài/chunk trong lab; 176 triple được trích xuất bằng OpenAI; 340 node, 219 edge và 0 edge thiếu provenance trong Neo4j.
 
----
+## 1. Coreference sai hoặc gặp khó khăn ở tình huống nào?
 
-## 1. Coreference Resolution — 1 ca phân giải sai và hậu quả
+Chunk `4f1346392056a403277d::c0000` mô tả giao dịch giữa Aeris và Ericsson. Một đoạn chứa đồng thời bên mua, bên chuyển giao và các tài sản “IoT Accelerator” và “Connected Vehicle Cloud”; vì vậy các cụm như “the company” hoặc “its” có thể bị gán nhầm giữa Aeris và Ericsson. Nếu coreference đảo antecedent, extractor có thể tạo cạnh `ACQUIRED` sai chiều hoặc gán công nghệ cho sai doanh nghiệp.
 
-**Cơ chế (conservative):** `resolve_coref_batch()` (cell 1.7) chỉ phân giải đại từ khi tiền ngữ xuất hiện rõ trong **cùng một chunk**; nếu mơ hồ thì giữ nguyên và log vào `unresolved_mentions`. `temperature=0.0`, strict JSON.
+Pipeline áp dụng chính sách bảo thủ: chỉ resolve khi antecedent rõ trong cùng chunk; trường hợp mơ hồ giữ nguyên và log `unresolved_mentions`. Output OpenAI lần cuối không xuất tổng số unresolved/fallback, nên không đủ bằng chứng để tuyên bố tỷ lệ coreference thành công. Đây là một thiếu sót audit cần bổ sung.
 
-**Ca thực tế:** `‹FILL: chunk_id + câu văn từ extraction_source, cột resolved_text›`
-- **Hiện tượng:** ví dụ điển hình trong tin M&A — câu "Aeris will acquire the business; **it** will support cellular IoT". Đại từ *it* có thể bị gán nhầm cho **Ericsson** (chủ thể được nhắc gần nhất) thay vì **Aeris/công nghệ được chuyển giao**.
-- **Hậu quả với Knowledge Graph:** phân giải sai tạo **False Edge** — ví dụ sinh cạnh `Ericsson -SUPPORTS-> cellular IoT` thay vì gán cho Aeris. Vì mọi cạnh đều mang provenance (`source_chunk_id`, `evidence`), lỗi này lan sang bước traversal và làm GraphRAG trả lời sai chủ thể của quan hệ.
-- **Kiểm chứng:** đếm `‹FILL: số dòng có unresolved_mentions không rỗng›` (in ra ở cell 1.7). Conservative rule ưu tiên **precision** — thà bỏ sót còn hơn tạo cạnh sai.
+## 2. Entity Resolution threshold bao nhiêu và vì sao?
 
----
+Ngưỡng cosine similarity là `0.90`. Mức này ưu tiên precision vì false merge nguy hiểm hơn missed merge: gộp sai hai entity sẽ tạo đường suy luận giả trên toàn bộ graph. ANN chỉ tạo candidate; quyết định cuối còn qua type constraint và lexical guard `SequenceMatcher >= 0.72` sau khi bỏ hậu tố doanh nghiệp.
 
-## 2. Entity Resolution Threshold & Lexical Guard
+Audit ghi nhận `Fidelity National Information Services` và `Fidelity National Information Services Inc.` có similarity `0.924524` và được `MERGE_VECTOR`. Đây là quyết định hợp lý vì khác biệt chỉ là hậu tố `Inc.`.
 
-**Ngưỡng đang dùng (cell 2.2):**
-- Vector match (FAISS `IndexFlatIP`, embedding cosine): **`threshold = 0.90`**, top-k = 5 láng giềng.
-- **Lexical Guard** sau vector: `merge_guard()` strip hậu tố công ty (`Inc, Corp, Ltd, LLC…`) rồi yêu cầu `SequenceMatcher.ratio() >= 0.72`; nếu chuỗi rút gọn trùng khớp thì merge ngay.
-- Union-Find (`UF`) gộp cụm; canonical = mention có **tần suất cao nhất** (tie-break theo độ dài, alphabet).
+## 3. Candidate similarity cao nào không nên merge?
 
-**Vì sao 0.90:** ngưỡng cao để tránh False Merge; các biến thể thật (`Microsoft` vs `Microsoft Corp`) đã được `MANUAL_ALIASES` + strip-suffix xử lý nên không cần hạ ngưỡng vector.
+Lần chạy này không phát sinh `REJECT_GUARD`; `entity_resolution_audit.csv` chỉ có một `MERGE_VECTOR`. Vì vậy không có candidate runtime hợp lệ để trích dẫn như một cặp similarity > 0.85 bị từ chối. Không nên bịa ví dụ thay cho log thực nghiệm.
 
-**Cặp similarity cao (>0.85) nhưng bị Guard chặn (`REJECT_GUARD`):** `‹FILL: 1 cặp thật từ entity_resolution_audit_df, cột left/right/similarity, lọc decision==REJECT_GUARD›`
-- Ví dụ mẫu kỳ vọng: **`Apple`** vs **`Apple Watch`** (hoặc `Sam Altman` vs `Steve Altman`) — vector similarity cao vì chia sẻ token, nhưng sau khi strip suffix chuỗi vẫn khác đủ để `SequenceMatcher < 0.72` → **không gộp**.
-- **Lý do ngữ nghĩa:** đây là **sản phẩm ≠ công ty** (Apple Watch là Technology, Apple là Company) / **hai người khác nhau**. Gộp nhầm sẽ kéo mọi cạnh của sản phẩm về công ty (super-node giả) và làm sai multi-hop.
+Để audit đầy đủ hơn, hệ thống nên ghi cả top-k candidate dưới threshold với `BELOW_VECTOR_THRESHOLD` và mọi candidate vượt vector threshold nhưng trượt lexical guard với `REJECT_GUARD`. Cách này tăng khả năng giải thích mà không hạ threshold merge.
 
----
+## 4. Top 3 node theo degree là gì?
 
-## 3. Super-node Analysis
+| Hạng | Entity | Type | Degree |
+|---:|---|---|---:|
+| 1 | Amazon Web Services | Company | 5 |
+| 2 | Raleon | Company | 4 |
+| 3 | L&T Technology Services Limited | Company | 3 |
 
-**Chính sách (cell 3.3):** `SUPER_NODE_DEGREE=100`, node bậc >100 → chỉ lấy **≤50 cạnh** `ORDER BY published_date DESC`; `GLOBAL_EDGE_CAP=250`; `MAX_GRAPH_CONTEXT_CHARS=14000`.
+Degree lớn nhất chỉ là 5, nên không node nào đạt ngưỡng super-node 100. Cả năm truy vấn đều có `graph_supernode_events = 0`.
 
-**Top-3 super-node (từ `top_degree_df`, cell 2.4):**
+## 5. Vì sao ưu tiên 50 edge mới nhất có thể đúng hoặc sai?
 
-| Hạng | Tên thực thể | Type | Degree |
-|------|--------------|------|--------|
-| 1 | ‹FILL› | ‹FILL› | ‹FILL› |
-| 2 | ‹FILL› | ‹FILL› | ‹FILL› |
-| 3 | ‹FILL› | ‹FILL› | ‹FILL› |
+Policy degree > 100 → tối đa 50 edge mới nhất giúp chặn BFS explosion, kiểm soát context/token và ưu tiên trạng thái hiện hành. Tổng traversal còn bị giới hạn bởi `GLOBAL_EDGE_CAP = 250` và graph context 14.000 ký tự.
 
-> Với subset 400 chunk, degree thực tế có thể < 100 (chưa kích hoạt cap). Nếu vậy, ghi rõ: *"Trong sample lab chưa có node vượt ngưỡng; chính sách được kiểm chứng bằng `test_supernode_policy()` và sẽ kích hoạt khi scale."*
-> Số lần cap kích hoạt trong eval: cột `graph_supernode_events` của `eval_results_df`.
+Rủi ro là câu hỏi lịch sử có thể cần một edge cũ nhưng quan trọng. Recency cũng không đồng nghĩa relevance. Production ranking nên kết hợp semantic relevance, confidence, recency và relation diversity, đồng thời dành một quota cho edge lịch sử.
 
-**Ưu điểm lấy 50 cạnh mới nhất:**
-- Chặn bùng nổ token/context (một node như *Google/Microsoft* có thể nối hàng nghìn thực thể) → giữ latency & chi phí ổn định.
-- Ưu tiên **thông tin cập nhật** (`published_date DESC`) — phù hợp tin tức, sự kiện M&A/đầu tư mới nhất thường là câu trả lời đúng.
+## 6. Flat RAG thắng nhóm nào?
 
-**Rủi ro:**
-- Câu hỏi về **sự kiện lịch sử xa** (cross-doc timeline) có thể bị cắt mất cạnh cũ → thiếu bằng chứng thời điểm đầu.
-- Recency bias: nếu quan hệ quan trọng nằm ở bài báo cũ, nó rớt khỏi top-50.
-- **Giảm thiểu:** khi câu hỏi mang tính lịch sử, nên bổ sung nhánh Vector (đã có trong Hybrid) hoặc nới cap theo loại quan hệ.
+Flat RAG không thắng về điểm trung bình chất lượng. Hai phương pháp cùng đạt comprehensiveness 4,8 và multi-hop 4,8; GraphRAG đạt faithfulness 5,0 so với 4,8 của Flat. Flat thắng rõ về latency tổng thể: 1,138 giây so với 1,879 giây, nhanh hơn khoảng 39,4% nếu lấy Graph làm mốc.
 
----
+Theo nhóm, Flat nhanh hơn ở `factoid` (0,868 so với 1,598 giây) và `cross-doc` (1,474 so với 2,670 giây). Đây là lợi thế kiến trúc vì không phải chạy seed extraction và Neo4j traversal.
 
-## 4. Bảng Benchmark & 2 Ca lỗi điển hình
+## 7. GraphRAG thắng nhóm nào?
 
-**Bảng so sánh (nguồn: `comparison_df` / `graphrag_vs_flatrag_summary.csv`):**
+Lợi thế chất lượng xuất hiện ở `cross-doc`: faithfulness trung bình 5,0 so với 4,5 của Flat. Ở G5000-07, GraphRAG đưa được cả feature nội bộ của ServiceNow và chương trình AI Lighthouse với NVIDIA/Accenture nên Judge cho faithfulness 5/5; Flat chỉ đạt 4/5.
 
-| Tiêu chí (trung bình) | Flat RAG | GraphRAG | Δ (Graph−Flat) | Nhận xét |
-|----------------------|----------|----------|----------------|----------|
-| Comprehensiveness (1–5) | ‹FILL› | ‹FILL› | ‹FILL› | |
-| Faithfulness (1–5) | ‹FILL› | ‹FILL› | ‹FILL› | |
-| Multi-hop reasoning (1–5) | ‹FILL› | ‹FILL› | ‹FILL› | |
-| Latency (s) | ‹FILL› | ‹FILL› | ‹FILL› | Graph thêm seed-extraction + Cypher |
-| Token usage | ‹FILL› | ‹FILL› | ‹FILL› | Graph context dài hơn (graph+vector) |
+Ở câu `multi-hop` G5000-05, hai phương pháp cùng đạt 5/5, nhưng GraphRAG nhanh hơn (0,858 so với 1,006 giây) và dùng ít token hơn (533 so với 641). Sample chỉ có một câu multi-hop nên chưa đủ để khái quát.
 
-*Gợi ý phân tích:* kỳ vọng GraphRAG **thắng multi-hop / cross-doc** (nối quan hệ qua nhiều bài), **hòa hoặc thua factoid** (câu tra cứu 1 sự thật thì Vector đủ), đổi lại **latency & token cao hơn**.
+## 8. Trade-off latency và token như thế nào?
 
-**Ca 1 — Flat RAG thất bại, GraphRAG thành công:** `‹FILL: chọn 1 id nhóm multi-hop, vd G5000-01 Aeris–Ericsson›`
-- *Vì sao Flat thất bại:* Vector top-k kéo về các chunk rời rạc, không **nối** được "Ericsson chuyển giao business → Aeris → hỗ trợ >100M IoT devices" vì 3 mẩu nằm ở 3 bài báo/ngày khác nhau (row 33, 1746, 935). Nếu chỉ 1–2 mẩu lọt top-6, câu trả lời thiếu.
-- *GraphRAG giải quyết:* seed `Aeris/Ericsson` → BFS 2-hop đi theo cạnh `ACQUIRED/TRANSFERRED`, linearize kèm `date` + `chunk` → cung cấp đủ chuỗi bằng chứng. Trích rationale của Judge: `‹FILL: graph_judge_rationale›`.
+| Metric trung bình | Flat RAG | GraphRAG | Graph − Flat |
+|---|---:|---:|---:|
+| Comprehensiveness | 4.80 | 4.80 | 0.00 |
+| Faithfulness | 4.80 | 5.00 | +0.20 |
+| Multi-hop reasoning | 4.80 | 4.80 | 0.00 |
+| Latency (s) | 1.138 | 1.879 | +0.741 |
+| Total tokens | 609.2 | 598.4 | -10.8 |
 
-**Ca 2 — GraphRAG thất bại / khó khăn:** `‹FILL: id có graph score thấp›`
-- *Nguyên nhân khả dĩ:* (a) **thiếu seed** (`NO_SEED` trong `graph_debug.diagnostics`) khi câu hỏi dùng tên không khớp `name_norm/aliases`; (b) **missing edge** do bài evidence không nằm trong 400 chunk trích xuất; (c) super-node cap cắt mất cạnh cần thiết.
-- *Đề xuất khắc phục:* mở rộng `EXTRACTION_MAX_CHUNKS`, thêm alias, bật **Self-Correction** (cell Bonus: hop2→hop3→vector fallback), nới cap theo relation-type.
+GraphRAG tăng faithfulness và giảm khoảng 1,8% token, nhưng chậm hơn khoảng 65,1% do thêm seed extraction, graph query và linearization. Token không tăng vì GraphRAG dùng top-4 vector chunks, còn Flat dùng top-6.
 
----
+## 9. Đề xuất nào của AI Coding Agent không được dùng?
 
-## 5. Trade-offs · Agent Control · Scale 350MB
+Không dùng pairwise cosine trên toàn bộ entity/chunk vì độ phức tạp `O(N²)` sẽ gây bùng nổ CPU/RAM ở quy mô lớn. Thay vào đó pipeline dùng FAISS ANN sinh top-k candidate rồi mới áp lexical guard. Cũng không hạ threshold chỉ để tạo đủ 10 audit row, vì cách đó làm tăng false merge và khiến graph kém tin cậy.
 
-**Đánh đổi Quality vs Cost vs Latency:**
-- GraphRAG trả giá bằng **indexing overhead** (coref + NER/RE + entity resolution + bulk insert) và **latency truy vấn** (seed LLM + nhiều round-trip Cypher), đổi lấy khả năng **multi-hop & cross-doc** mà Flat không có.
-- Flat RAG rẻ/nhanh, đủ tốt cho factoid; là **baseline** hợp lý cho phần lớn truy vấn tra cứu.
-- Chiến lược production: **router** — factoid → Flat; multi-hop/cross-doc → GraphRAG (hoặc Hybrid mặc định như notebook).
+## 10. Khi scale lên 350 MB, bottleneck đầu tiên là gì?
 
-**Đề xuất của AI Coding Agent mà tôi TỪ CHỐI:** `‹FILL: điền quyết định thật của bạn›`
-- Ví dụ nên nêu: *"Agent gợi ý so khớp entity bằng pairwise cosine O(N²) trên toàn bộ mentions — tôi từ chối vì tràn RAM khi scale; giữ FAISS ANN top-k + Union-Find (gần O(N·k))."* Hoặc *"Agent đề nghị bỏ Lexical Guard để tăng recall merge — tôi từ chối vì rủi ro False Merge (Apple vs Apple Watch)."*
+Bottleneck đầu tiên là coreference và NER/RE qua LLM: số request, token cost, rate limit và khả năng chạy lại batch lỗi. Lượt Groq trước từng đạt quota 199.981/200.000 token; chuyển sang OpenAI giúp extraction đạt 176 triple và 0 batch lỗi nhưng không loại bỏ bản chất bottleneck.
 
-**Scale lên 350MB (~100k bài) — bottleneck đầu tiên & giải pháp:**
-- **Bottleneck #1: LLM extraction** (NER+RE cho ~hàng trăm nghìn chunk) — chi phí & rate-limit lớn nhất. → Async batch + hàng đợi worker, cache theo hash chunk, chỉ trích xuất chunk có tín hiệu entity (pre-filter NER nhẹ), tăng batch size.
-- **Entity Resolution:** thay FAISS Flat bằng **HNSW** + **blocking** theo type/token đầu để tránh so khớp toàn cục.
-- **Neo4j:** giữ `UNWIND` batch 1000, tạo constraint/index trước; cân nhắc `apoc.periodic.iterate`.
-- **Super-node:** ở quy mô này cap 50 là bắt buộc; thêm **Community Detection** (Bonus) để Global Search thay vì duyệt toàn đồ thị.
+Kiến trúc scale gồm: bounded worker queue; retry/backoff; checkpoint idempotent theo `chunk_id`; model routing để chỉ gửi chunk có khả năng chứa relation; lưu raw response và validation error; entity blocking + HNSW/FAISS; Neo4j `UNWIND` theo batch; incremental update; community partition và query router theo loại câu hỏi.

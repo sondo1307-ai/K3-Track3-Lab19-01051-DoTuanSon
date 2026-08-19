@@ -1,59 +1,67 @@
-# Phân tích Ca lỗi (Failure Analysis) — Lab 19
+# Phân tích ca lỗi — Flat RAG vs GraphRAG
 
-**Học viên:** Đỗ Tuấn Sơn · Track 3: GraphRAG
-**Nguồn dữ liệu:** `outputs/graphrag_eval_results.csv` (từ `run_evaluation`)
+**Học viên:** Đỗ Tuấn Sơn
 
-> Quy trình: mỗi ca gồm **(1) Câu hỏi & nhóm → (2) Điểm Judge Flat vs Graph → (3) Root-cause → (4) Bằng chứng từ retrieval/graph_debug → (5) Đề xuất khắc phục.**
-> `‹FILL›` = điền từ file kết quả sau khi chạy.
+## 1. Phạm vi và bằng chứng
 
----
+Phân tích dựa trên 5 Golden queries trong `outputs/graphrag_eval_results.csv`. Cả hai phương pháp đạt điểm cao; không có trường hợp một hệ thống thất bại hoàn toàn. Vì vậy báo cáo tập trung vào chênh lệch có thể quan sát và failure mode còn tồn tại, không tạo ca lỗi giả.
 
-## Ca lỗi #1 — Flat RAG thất bại ở câu MULTI-HOP (GraphRAG thành công)
+## 2. Ca Flat RAG yếu hơn GraphRAG — G5000-07
 
-| Trường | Giá trị |
-|--------|---------|
-| Question ID / nhóm | `‹FILL› / multi-hop` (gợi ý: G5000-01 Aeris–Ericsson) |
-| Câu hỏi | `‹FILL›` |
-| Flat scores (Comp/Faith/Multi-hop) | `‹FILL / FILL / FILL›` |
-| Graph scores (Comp/Faith/Multi-hop) | `‹FILL / FILL / FILL›` |
+**Câu hỏi:** ServiceNow mở rộng generative AI trong tháng 7 khác nhau thế nào giữa feature của platform và chương trình hệ sinh thái với NVIDIA/Accenture?
 
-**Root-cause của Flat RAG:** Vector search trả về top-6 chunk **tương đồng bề mặt** nhưng không đảm bảo chứa **đủ mắt xích** của chuỗi suy luận. Bằng chứng nằm rải ở nhiều bài/ngày khác nhau (ví dụ row 33 / 1746 / 935) → một vài mắt xích rớt khỏi top-k → câu trả lời **thiếu thực thể hoặc thiếu số liệu**.
+**Kết quả:**
 
-**Vì sao GraphRAG vượt qua:** seed entity (`‹FILL: graph_debug.diagnostics.matched_seeds›`) → BFS `max_hops=2` đi theo cạnh `ACQUIRED/DEVELOPED/INVESTED_IN`, gom subgraph **có provenance** (`date`, `chunk`, `evidence`) → linearize thành context tường minh → Judge chấm cao hơn ở Comprehensiveness & Multi-hop.
-- Trích rationale Judge (graph): `‹FILL: graph_judge_rationale›`
+| Metric | Flat | Graph |
+|---|---:|---:|
+| Comprehensiveness | 4 | 4 |
+| Faithfulness | 4 | 5 |
+| Multi-hop reasoning | 4 | 4 |
+| Latency (s) | 1.953 | 3.521 |
+| Tokens | 706 | 725 |
 
-**Khắc phục cho Flat:** tăng k, thêm reranker, hoặc query-decomposition; nhưng bản chất multi-hop vẫn cần cấu trúc đồ thị.
+### Triệu chứng
 
----
+Flat answer nhận diện đúng case summarization, text-to-code và AI Lighthouse, nhưng phần mô tả chương trình ecosystem còn chung chung. Judge đánh giá nội dung chưa khai thác đầy đủ evidence và cho faithfulness 4/5.
 
-## Ca lỗi #2 — GraphRAG thất bại / khó khăn
+### Root cause
 
-| Trường | Giá trị |
-|--------|---------|
-| Question ID / nhóm | `‹FILL›` |
-| Câu hỏi | `‹FILL›` |
-| Graph scores | `‹FILL›` |
-| `graph_supernode_events` | `‹FILL›` |
-| Diagnostics | `‹FILL: NO_SEED? / expanded_nodes / collected_edges›` |
+Vector retrieval xếp hạng từng chunk độc lập. Câu hỏi yêu cầu tách hai nhánh thông tin ở các tài liệu khác nhau: feature nội bộ của ServiceNow và chương trình hợp tác bên ngoài. Flat context có đủ tài liệu nhưng không biểu diễn rõ vai trò/quan hệ giữa các entity.
 
-**Cây chẩn đoán nguyên nhân gốc (chọn nhánh đúng với ca của bạn):**
-1. **NO_SEED** — `match_seeds()` không tìm được node: tên trong câu hỏi không khớp `name_norm`/`aliases_norm` và vector fuzzy < 0.66. → *Fix:* bổ sung alias, hạ nhẹ `fuzzy_threshold`, cải thiện `extract_seeds`.
-2. **Missing edge (extraction gap)** — bài evidence **không nằm trong 400 chunk** trích xuất (ngoài `EXTRACTION_MAX_CHUNKS`) hoặc bị lọc precision. → *Fix:* tăng ngân sách trích xuất / ưu tiên chunk theo golden (đã áp dụng một phần).
-3. **Super-node cap** — cạnh cần thiết bị cắt do `ORDER BY published_date DESC LIMIT 50`. → *Fix:* nới cap theo relation-type, hoặc Self-Correction hop3.
-4. **False edge từ coref sai** — quan hệ gán nhầm chủ thể (xem `technical_defense.md` §1). → *Fix:* siết conservative prompt, tăng ngưỡng confidence khi insert.
+### Vì sao GraphRAG tốt hơn
 
-**Nguyên nhân xác định cho ca này:** `‹FILL: chọn 1–2 nhánh trên kèm bằng chứng cụ thể›`
+Hybrid context đưa thêm entity/relationship quanh ServiceNow, NVIDIA và Accenture, giúp generator tách feature platform khỏi ecosystem program. Graph answer đạt faithfulness 5/5. Tuy nhiên comprehensiveness vẫn chỉ 4/5, nên GraphRAG cải thiện nhưng chưa giải quyết hoàn toàn câu hỏi.
 
-**Đề xuất khắc phục:** `‹FILL›`
+### Khắc phục
 
----
+Thêm relation `LAUNCHED`, node `Program`/`Product`, relation role rõ ràng và prompt yêu cầu bảng đối chiếu hai nhánh. Với Flat, dùng query decomposition thành hai truy vấn con trước khi tổng hợp.
 
-## Tổng hợp mẫu lỗi theo nhóm câu hỏi
+## 3. Ca GraphRAG khó khăn — latency trên cross-doc
 
-| Nhóm | Ai thắng (kỳ vọng) | Mẫu lỗi thường gặp |
-|------|--------------------|--------------------|
-| factoid | Flat ≈ Graph | Graph có thể NO_SEED cho câu quá ngắn; Flat đủ dùng |
-| multi-hop | **Graph** | Flat mất mắt xích; Graph phụ thuộc extraction coverage |
-| cross-doc | **Graph** | recency-cap cắt bằng chứng cũ; temporal state (planned vs completed) dễ nhầm |
+**Quan sát:** Nhóm cross-doc có latency GraphRAG 2,670 giây, cao hơn Flat 1,474 giây; token cũng cao hơn 757 so với 651. Riêng G5000-07, GraphRAG mất 3,521 giây.
 
-**Nhận xét chung:** `‹FILL: 3–5 câu tổng kết dựa trên bảng comparison_df thật›`
+### Root cause
+
+GraphRAG phải thực hiện thêm các bước không có ở Flat: LLM seed extraction, exact/fuzzy entity matching, nhiều Cypher query cho degree và recent edges, BFS hai hop, textualization, rồi mới ghép vector context. Các bước đang thực hiện tuần tự nên round-trip latency cộng dồn.
+
+### Tác động
+
+Faithfulness tăng 0,5 điểm trong nhóm cross-doc nhưng latency tăng khoảng 81,1%. Với truy vấn tương tác thời gian thực, trade-off này có thể không được chấp nhận nếu câu hỏi đơn giản.
+
+### Khắc phục
+
+- Cache seed extraction và node degree.
+- Batch Cypher thay cho một query trên từng node.
+- Router bỏ graph traversal cho factoid đơn giản.
+- Chạy vector retrieval song song với seed/graph retrieval.
+- Dùng sufficiency check để chỉ mở hop tiếp theo khi cần.
+
+## 4. Failure mode dữ liệu và evaluation
+
+Entity audit chỉ có một `MERGE_VECTOR`, chưa đạt yêu cầu 10 dòng và không có `REJECT_GUARD`. Degree lớn nhất là 5 nên super-node branch chưa được kích hoạt. Neo4j có 340 node/219 edge, trong khi lượt OpenAI cuối insert 297 node/175 edge, cho thấy database còn dữ liệu từ lượt trước. Vì vậy benchmark chưa hoàn toàn cô lập theo một lần ingestion.
+
+Lần chạy tiếp theo nên dùng database hoặc `run_id` riêng, xuất coreference statistics, mở rộng audit logging và bổ sung unit test tạo graph fixture có degree > 100 để kiểm chứng cap 50 mà không làm sai dữ liệu thật.
+
+## 5. Kết luận
+
+Flat RAG là baseline mạnh cho bộ dữ liệu nhỏ khi evidence đã được ưu tiên vào index. GraphRAG đem lại lợi thế faithfulness ở cross-document reasoning nhưng trả giá bằng latency. Chất lượng GraphRAG phụ thuộc trực tiếp vào schema, extraction coverage, entity audit và retrieval policy; graph lớn hơn không tự động đồng nghĩa câu trả lời tốt hơn.
